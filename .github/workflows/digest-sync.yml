@@ -1,0 +1,142 @@
+name: Digest sync
+
+# Once a day: if CrossPoint has a newer release than ours, rebase the digest
+# commits onto it, test, build and publish crosspoint-<version>-digest. The
+# device's "Check for updates" reads this repo's latest release.
+# A rebase conflict opens an issue instead of publishing anything.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: digest-sync
+
+env:
+  UPSTREAM_REPO: crosspoint-reader/crosspoint-reader
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: digest
+          fetch-depth: 0
+
+      - name: Find the latest CrossPoint release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
+          version="${tag#v}"
+          ours="${version}-digest"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ours=$ours" >> "$GITHUB_OUTPUT"
+          if gh release view "$ours" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Already published $ours"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase digest onto ${{ steps.upstream.outputs.tag }}
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          old_tag="$(cat digest/UPSTREAM_TAG)"
+          git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" \
+            "refs/tags/$old_tag:refs/upstream/old" "refs/tags/$NEW_TAG:refs/upstream/new"
+          if [ "$old_tag" = "$NEW_TAG" ]; then
+            echo "Already based on $NEW_TAG"
+            exit 0
+          fi
+          if ! git rebase --onto refs/upstream/new refs/upstream/old digest; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            git rebase --abort
+            title="Digest changes don't apply to CrossPoint $NEW_TAG"
+            if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$title in:title" --json number --jq '.[].number')" ]; then
+              printf 'Rebasing the digest commits from %s onto %s conflicts in:\n\n```\n%s\n```\n\nThe device keeps its current firmware until this is fixed.\n' \
+                "$old_tag" "$NEW_TAG" "$conflicts" > issue.md
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file issue.md
+            fi
+            exit 1
+          fi
+          echo "$NEW_TAG" > digest/UPSTREAM_TAG
+          git commit -m "chore: digest based on CrossPoint $NEW_TAG" digest/UPSTREAM_TAG
+
+      - name: Fetch submodules
+        if: steps.upstream.outputs.needed == 'true'
+        run: git submodule update --init --recursive
+
+      - name: Install build tools
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Run unit tests
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          cmake -S test -B build/test -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/test
+          ctest --test-dir build/test --output-on-failure -j
+
+      - uses: actions/setup-python@v6
+        if: steps.upstream.outputs.needed == 'true'
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        if: steps.upstream.outputs.needed == 'true'
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: false
+
+      - name: Install PlatformIO Core
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          # Same pins as upstream's release.yml.
+          uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          uv pip install --system -U "littlefs-python>=0.16.0" "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" \
+            "rich-click>=1.8.6" "zopfli>=0.2.2" "intelhex>=2.3.0" "rich>=14.0.0" "urllib3<2" \
+            "cryptography>=45.0.3" "certifi>=2025.8.3" "ecdsa>=0.19.1" "bitstring>=4.3.1" \
+            "reedsolo>=1.5.3,<1.8" "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0"
+
+      - name: Build firmware
+        if: steps.upstream.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          cp digest/platformio.digest.ini platformio.local.ini
+          pio pkg install -e digest
+          uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19"
+          pio run -e digest -j1
+          version="$(sed -n 's/^version = //p' platformio.ini | head -n1)"
+          test "${version}-digest" = "${{ steps.upstream.outputs.ours }}"
+
+      - name: Publish release
+        if: steps.upstream.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OURS: ${{ steps.upstream.outputs.ours }}
+          NEW_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin digest
+          asset="crosspoint-${OURS}-x3-x4.bin"
+          cp .pio/build/digest/firmware.bin "$asset"
+          gh release create "$OURS" "$asset" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+            --title "$OURS" --notes "CrossPoint $NEW_TAG with the daily digest download. Upstream notes: https://github.com/$UPSTREAM_REPO/releases/tag/$NEW_TAG"

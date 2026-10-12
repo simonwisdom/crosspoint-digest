@@ -66,7 +66,7 @@ void HalPowerManager::setPowerSaving(bool enabled) {
   // Otherwise, no change needed
 }
 
-void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
+void HalPowerManager::startDeepSleep(HalGPIO& gpio, const uint64_t timerWakeSeconds) const {
 #ifdef ENABLE_SERIAL_LOG
   // Tear down HWCDC so the host sees a clean disconnect and the peripheral
   // doesn't hold power domains that interfere with USB-powered GPIO wake.
@@ -76,7 +76,13 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
 #endif
 
 #if !SOC_PM_SUPPORT_EXT1_WAKEUP
-  if (gpio.isXteinkDevice()) {
+  if (gpio.isXteinkDevice() && timerWakeSeconds > 0) {
+    // Keep the battery latched so the RTC timer keeps running through sleep.
+    gpio_hold_dis(XTEINK_C3_GPIO13);
+    gpio_set_direction(XTEINK_C3_GPIO13, GPIO_MODE_OUTPUT);
+    gpio_set_level(XTEINK_C3_GPIO13, 1);
+    gpio_hold_en(XTEINK_C3_GPIO13);
+  } else if (gpio.isXteinkDevice()) {
     // GPIO13 gates the battery MOSFET on both Xteink C3 boards; driving it low
     // is the battery power-off (the SDK wake source still handles USB power).
     // Release any surviving pad hold first: hold_en survives deep sleep via
@@ -127,6 +133,11 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
     delay(1000);  // allow the PMIC firmware time to drop power
   }
 #endif
+
+  if (timerWakeSeconds > 0) {
+    LOG_INF("PWR", "Timer wakeup in %llu s", static_cast<unsigned long long>(timerWakeSeconds));
+    esp_sleep_enable_timer_wakeup(timerWakeSeconds * 1000000ULL);
+  }
 
   // Waits for the power button to be physically released (so holding it doesn't
   // immediately wake the device again), then arms the wake source and sleeps.

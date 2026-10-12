@@ -7,12 +7,13 @@
 
 HalClock halClock;  // Singleton instance
 
-void HalClock::begin() {
-  _available = _sdkRtc.begin();
-  LOG_INF("CLK", _available ? "SDK RTC found" : "RTC not found");
-}
+// RTC slow memory: survives deep sleep, zeroed on power-on.
+RTC_DATA_ATTR static time_t lastNtpSyncEpoch = 0;
 
 namespace {
+// Anything before 2025-01-01 means the system clock was never set since power-on.
+constexpr time_t MIN_VALID_EPOCH = 1735689600;
+
 // UTC calendar date -> Unix epoch, no timezone involvement (newlib has no
 // timegm). Days-from-civil per Howard Hinnant's algorithm.
 time_t epochFromUtc(const Rtc::DateTime& dt) {
@@ -28,6 +29,33 @@ time_t epochFromUtc(const Rtc::DateTime& dt) {
 }
 }  // namespace
 
+void HalClock::begin() {
+  _available = _sdkRtc.begin();
+  _systemClock = !_available;
+  LOG_INF("CLK", _available ? "SDK RTC found" : "RTC not found, using system clock");
+}
+
+time_t HalClock::getLastSyncEpoch() const { return lastNtpSyncEpoch; }
+
+bool HalClock::hasValidTime() const {
+  if (_available) return true;
+  return _systemClock && time(nullptr) >= MIN_VALID_EPOCH;
+}
+
+bool HalClock::getEpoch(time_t& epoch) const {
+  if (_available) {
+    Rtc::DateTime dt;
+    if (!_sdkRtc.now(dt)) return false;
+    epoch = epochFromUtc(dt);
+    return true;
+  }
+  if (!_systemClock) return false;
+  const time_t now = time(nullptr);
+  if (now < MIN_VALID_EPOCH) return false;
+  epoch = now;
+  return true;
+}
+
 void HalClock::setTimezone(const char* posixTz) {
   setenv("TZ", posixTz && posixTz[0] != '\0' ? posixTz : "UTC0", 1);
   tzset();
@@ -35,6 +63,12 @@ void HalClock::setTimezone(const char* posixTz) {
 }
 
 bool HalClock::localTime(struct tm& out) const {
+  if (_systemClock) {
+    time_t now;
+    if (!getEpoch(now)) return false;
+    localtime_r(&now, &out);
+    return true;
+  }
   if (!_available) return false;
 
   const unsigned long now = millis();
@@ -77,7 +111,7 @@ bool HalClock::formatTime(char* buf, size_t bufSize, bool use12Hour) const {
 }
 
 bool HalClock::syncFromNTP() {
-  if (!_available) return false;
+  if (!isAvailable()) return false;
 
   if (WiFi.status() != WL_CONNECTED) {
     LOG_ERR("CLK", "WiFi not connected, cannot sync NTP");
@@ -97,6 +131,13 @@ bool HalClock::syncFromNTP() {
   for (int i = 0; i < maxAttempts; i++) {
     if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
       time_t now = time(nullptr);
+      lastNtpSyncEpoch = now;
+      if (_systemClock) {
+        // SNTP already set the system clock, which is our only time source.
+        LOG_INF("CLK", "System clock set from NTP (epoch %lld)", static_cast<long long>(now));
+        setTimezone(savedTz);
+        return true;
+      }
       struct tm timeinfo;
       gmtime_r(&now, &timeinfo);
 

@@ -20,11 +20,13 @@
 #include <WiFi.h>
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
+#include <esp_sleep.h>
 
 #include <cstring>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "DigestFetch.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
@@ -297,7 +299,7 @@ void enterDeepSleep(bool fromTimeout = false) {
   Storage.prepareForDeepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
-  powerManager.startDeepSleep(gpio);
+  powerManager.startDeepSleep(gpio, DigestFetch::secondsUntilNextFetch());
 }
 
 void setupDisplayAndFonts(bool seamless = false) {
@@ -455,7 +457,7 @@ void setup() {
       if (!wakeHoldVerified && SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::SLEEP) {
         LOG_DBG("MAIN", "Power-button wake not held through verification, sleeping");
         Storage.prepareForDeepSleep();
-        powerManager.startDeepSleep(gpio);
+        powerManager.startDeepSleep(gpio, DigestFetch::secondsUntilNextFetch());
       }
       wakePowerReleasePending = true;
       break;
@@ -472,7 +474,7 @@ void setup() {
       break;
 #else
       Storage.prepareForDeepSleep();
-      powerManager.startDeepSleep(gpio);
+      powerManager.startDeepSleep(gpio, DigestFetch::secondsUntilNextFetch());
       break;
 #endif
     case HalGPIO::WakeupReason::AfterFlash:
@@ -480,6 +482,16 @@ void setup() {
     case HalGPIO::WakeupReason::Other:
     default:
       break;
+  }
+
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    // Daily digest fetch: the panel keeps showing the sleep screen, so skip the
+    // display and go straight back to sleep.
+    LOG_INF("MAIN", "Timer wake, fetching digest");
+    DigestFetch::runTimerWake();
+    halTiltSensor.deepSleep();
+    Storage.prepareForDeepSleep();
+    powerManager.startDeepSleep(gpio, DigestFetch::secondsUntilNextFetch());
   }
 
   LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);

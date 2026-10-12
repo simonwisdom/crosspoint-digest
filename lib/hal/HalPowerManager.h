@@ -40,7 +40,10 @@ class HalPowerManager {
 
   // Setup wake up GPIO and enter deep sleep
   // Should be called inside main loop() to handle the currentLockMode
-  void startDeepSleep(HalGPIO& gpio) const;
+  // timerWakeSeconds > 0 also arms a timer wakeup. On Xteink C3 boards that
+  // keeps the battery connected (real deep sleep instead of power-off) so the
+  // system clock and the timer survive.
+  void startDeepSleep(HalGPIO& gpio, uint64_t timerWakeSeconds = 0) const;
 
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;
