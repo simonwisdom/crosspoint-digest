@@ -4,6 +4,7 @@ name: Digest sync
 # commits onto it, test, build and publish crosspoint-<version>-digest. The
 # device's "Check for updates" reads this repo's latest release.
 # A rebase conflict opens an issue instead of publishing anything.
+# Run it by hand with: gh workflow run digest-sync.yml -R <owner>/<repo>
 
 on:
   schedule:
