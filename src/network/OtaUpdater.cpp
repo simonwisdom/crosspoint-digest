@@ -15,6 +15,7 @@
 #include <cstring>
 #include <string>
 
+#include "DigestVersion.h"
 #include "FirmwareBoardTag.h"
 #include "FirmwareFlasher.h"
 
@@ -129,7 +130,7 @@ bool OtaUpdater::isUpdateNewer() const {
     return true;
   }
 
-  return false;
+  return DigestVersion::isNewerRevision(latestVersion.c_str(), currentVersion);
 }
 
 const std::string& OtaUpdater::getLatestVersion() const { return latestVersion; }

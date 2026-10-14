@@ -1,17 +1,24 @@
 name: Digest sync
 
-# Once a day: if CrossPoint has a newer release than ours, rebase the digest
-# commits onto it, test, build and publish crosspoint-<version>-digest. The
-# device's "Check for updates" reads this repo's latest release.
+# Once a day and on each push to digest: rebase the digest commits onto the
+# latest CrossPoint release if it's newer, then test, build and publish
+# crosspoint-<version>-digest.<revision> unless that release exists. The
+# revision counts the digest commits, so a digest-only fix is published too.
+# The device's "Check for updates" reads this repo's latest release.
 # A rebase conflict opens an issue instead of publishing anything.
+# Each run re-enables this workflow, so GitHub's 60-day pause for quiet repos
+# never starts.
 # Run it by hand with: gh workflow run digest-sync.yml -R <owner>/<repo>
 
 on:
   schedule:
     - cron: '17 3 * * *'
+  push:
+    branches: [digest]
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   issues: write
 
@@ -30,41 +37,19 @@ jobs:
           ref: digest
           fetch-depth: 0
 
-      - name: Find the latest CrossPoint release
+      - name: Rebase onto the latest CrossPoint release
         id: upstream
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
-          version="${tag#v}"
-          ours="${version}-digest"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "ours=$ours" >> "$GITHUB_OUTPUT"
-          if gh release view "$ours" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "Already published $ours"
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Rebase digest onto ${{ steps.upstream.outputs.tag }}
-        if: steps.upstream.outputs.needed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NEW_TAG: ${{ steps.upstream.outputs.tag }}
-        run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          NEW_TAG="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
           old_tag="$(cat digest/UPSTREAM_TAG)"
           git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" \
             "refs/tags/$old_tag:refs/upstream/old" "refs/tags/$NEW_TAG:refs/upstream/new"
-          if [ "$old_tag" = "$NEW_TAG" ]; then
-            echo "Already based on $NEW_TAG"
-            exit 0
-          fi
-          if ! git rebase --onto refs/upstream/new refs/upstream/old digest; then
+          if [ "$old_tag" != "$NEW_TAG" ] && ! git rebase --onto refs/upstream/new refs/upstream/old digest; then
             conflicts="$(git diff --name-only --diff-filter=U)"
             git rebase --abort
             title="Digest changes don't apply to CrossPoint $NEW_TAG"
@@ -75,8 +60,21 @@ jobs:
             fi
             exit 1
           fi
-          echo "$NEW_TAG" > digest/UPSTREAM_TAG
-          git commit -m "chore: digest based on CrossPoint $NEW_TAG" digest/UPSTREAM_TAG
+          if [ "$old_tag" != "$NEW_TAG" ]; then
+            echo "$NEW_TAG" > digest/UPSTREAM_TAG
+            git commit -m "chore: digest based on CrossPoint $NEW_TAG" digest/UPSTREAM_TAG
+          fi
+          revision="$(git rev-list --count refs/upstream/new..HEAD)"
+          ours="${NEW_TAG#v}-digest.${revision}"
+          echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "ours=$ours" >> "$GITHUB_OUTPUT"
+          if gh release view "$ours" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Already published $ours"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Fetch submodules
         if: steps.upstream.outputs.needed == 'true'
@@ -119,6 +117,8 @@ jobs:
 
       - name: Build firmware
         if: steps.upstream.outputs.needed == 'true'
+        env:
+          DIGEST_REVISION: ${{ steps.upstream.outputs.revision }}
         run: |
           set -euo pipefail
           cp digest/platformio.digest.ini platformio.local.ini
@@ -126,7 +126,7 @@ jobs:
           uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19"
           pio run -e digest -j1
           version="$(sed -n 's/^version = //p' platformio.ini | head -n1)"
-          test "${version}-digest" = "${{ steps.upstream.outputs.ours }}"
+          test "${version}-digest.${DIGEST_REVISION}" = "${{ steps.upstream.outputs.ours }}"
 
       - name: Publish release
         if: steps.upstream.outputs.needed == 'true'
@@ -141,3 +141,9 @@ jobs:
           cp .pio/build/digest/firmware.bin "$asset"
           gh release create "$OURS" "$asset" --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
             --title "$OURS" --notes "CrossPoint $NEW_TAG with the daily digest download. Upstream notes: https://github.com/$UPSTREAM_REPO/releases/tag/$NEW_TAG"
+
+      - name: Keep this workflow enabled
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/digest-sync.yml/enable"
