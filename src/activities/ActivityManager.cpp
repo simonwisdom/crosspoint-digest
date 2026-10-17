@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "CrossPointSettings.h"
+#include "DigestFetch.h"
 #include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
@@ -22,6 +23,7 @@
 #include "library/LibraryListActivity.h"
 #include "network/CrossPointWebServerActivity.h"
 #include "network/UsbDriveActivity.h"
+#include "reader/DigestFetchActivity.h"
 #include "reader/ReaderActivity.h"
 #include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
@@ -297,6 +299,17 @@ void ActivityManager::goToReader(std::string path, const bool allowFastInitialRe
     auto activity = makeUniqueNoThrow<BmpViewerActivity>(renderer, mappedInput, std::move(path));
     if (!activity) {
       LOG_ERR("ACT", "OOM: bitmap viewer activity");
+      return;
+    }
+    replaceActivity(std::move(activity));
+    return;
+  }
+
+  if (DigestFetch::shouldFetchBeforeOpening(path)) {
+    auto activity =
+        makeUniqueNoThrow<DigestFetchActivity>(renderer, mappedInput, std::move(path), allowFastInitialRefresh);
+    if (!activity) {
+      LOG_ERR("ACT", "OOM: digest fetch activity");
       return;
     }
     replaceActivity(std::move(activity));

@@ -2,17 +2,12 @@
 
 #include <Arduino.h>
 #include <Rtc.h>
-#include <time.h>
 
 class HalClock;
 extern HalClock halClock;  // Singleton
 
 class HalClock {
   bool _available = false;
-  // No RTC chip (X4): fall back to the ESP32 system clock. It keeps running
-  // through deep sleep and software resets but is lost on a battery power-off,
-  // so it only counts as valid once NTP has set it.
-  bool _systemClock = false;
   mutable Rtc _sdkRtc;
   // The RTC keeps UTC; local time comes from newlib's localtime_r under the
   // POSIX TZ rule set via setTimezone(), so zones with DST are correct
@@ -27,18 +22,8 @@ class HalClock {
   // Call after BoardConfig has selected the active device.
   void begin();
 
-  // True if the device can keep time: an RTC chip, or the system clock on RTC-less boards
-  bool isAvailable() const { return _available || _systemClock; }
-
-  // True once the clock holds a plausible date (always true with an RTC chip).
-  bool hasValidTime() const;
-
-  // Current UTC time as a Unix epoch. Returns false if no valid time is known.
-  bool getEpoch(time_t& epoch) const;
-
-  // UTC epoch of the last successful NTP sync, or 0 if none since power-on.
-  // Kept in RTC memory, so it survives deep sleep but not a battery power-off.
-  time_t getLastSyncEpoch() const;
+  // True if an RTC is present on this device
+  bool isAvailable() const { return _available; }
 
   // Set the POSIX TZ rule (e.g. "CET-1CEST,M3.5.0,M10.5.0/3") applied to every
   // read. nullptr/empty falls back to UTC. Drops the read cache so the change
