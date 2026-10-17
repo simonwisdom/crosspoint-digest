@@ -19,9 +19,10 @@ constexpr const char* PART_PATH = "/Digest/.Daily Digest.part";
 constexpr const char* URL_PATH = "/.crosspoint/digest-url";
 constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
 
-// RTC slow memory survives the silent reboot that follows a fetch;
-// startNewWake() clears it on every real wake.
-RTC_DATA_ATTR bool triedThisWake = false;
+// RTC_NOINIT survives the silent reboot that follows a fetch (RTC_DATA_ATTR is
+// re-initialised by ESP.restart()); startNewWake() clears it on every real wake.
+constexpr uint32_t TRIED_MAGIC = 0xD16E57A1;
+RTC_NOINIT_ATTR uint32_t triedThisWakeMagic;
 
 bool cancelled(const CancelCheck& cancel) { return cancel.fn && cancel.fn(cancel.ctx); }
 
@@ -106,11 +107,11 @@ bool downloadDigest(const String& url, const CancelCheck& cancel) {
 
 }  // namespace
 
-void startNewWake() { triedThisWake = false; }
+void startNewWake() { triedThisWakeMagic = 0; }
 
 bool shouldFetchBeforeOpening(const std::string& path) {
 #ifdef DIGEST_FETCH
-  return !triedThisWake && path == DIGEST_PATH;
+  return triedThisWakeMagic != TRIED_MAGIC && path == DIGEST_PATH;
 #else
   (void)path;
   return false;
@@ -118,7 +119,7 @@ bool shouldFetchBeforeOpening(const std::string& path) {
 }
 
 bool fetch(const CancelCheck cancel) {
-  triedThisWake = true;
+  triedThisWakeMagic = TRIED_MAGIC;
   String url = Storage.readFile(URL_PATH);
   url.trim();
   if (!url.startsWith("https://")) {
